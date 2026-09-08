@@ -1,0 +1,17 @@
+{
+  "name": "tilda-1c-bridge",
+  "version": "1.0.0",
+  "description": "Прокладка между вебхуком Тильды и обменом CommerceML с 1С",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "fast-xml-parser": "^4.4.1",
+    "dotenv": "^16.4.5"
+  }
+}

@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: tilda-1c-bridge
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: AUTH_USER
+        sync: false
+      - key: AUTH_PASS
+        sync: false
+      - key: TILDA_USER
+        sync: false
+      - key: TILDA_PASS
+        sync: false
