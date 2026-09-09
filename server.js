@@ -113,15 +113,49 @@ function rawBodyFrom(req) {
   return new URLSearchParams(req.body || {}).toString();
 }
 
+// Заказы у настоящей Тильды требуют отдельной сессии: сначала checkauth именно
+// для sale, который выдаёт временную куку, и только с ней Тильда отдаёт реальный
+// XML заказов. Без этого шага query падает с "failure / Auth required".
+async function tildaSaleCheckAuth() {
+  const url = new URL(TILDA_URL);
+  url.searchParams.set('type', 'sale');
+  url.searchParams.set('mode', 'checkauth');
+
+  const upstream = await fetch(url, {
+    headers: { Authorization: tildaAuthHeader() },
+  });
+  const text = await upstream.text();
+
+  console.log('--- Ответ Тильды на sale checkauth ---');
+  console.log(text);
+  console.log('--- конец ответа checkauth ---');
+
+  const lines = text.trim().split('\n').map((l) => l.trim());
+  if (lines[0] !== 'success') {
+    throw new Error('Tilda checkauth для sale не вернула success: ' + text);
+  }
+  return { cookieName: lines[1], cookieValue: lines[2] };
+}
+
 // Забираем настоящий XML заказов у Тильды и подменяем в нём данные покупателя
 async function handleSaleQuery(req, res) {
   const url = new URL(TILDA_URL);
   url.searchParams.set('type', 'sale');
   url.searchParams.set('mode', 'query');
 
-  const upstream = await fetch(url, {
-    headers: { Authorization: tildaAuthHeader() },
-  });
+  const headers = { Authorization: tildaAuthHeader() };
+
+  try {
+    const { cookieName, cookieValue } = await tildaSaleCheckAuth();
+    if (cookieName && cookieValue) {
+      headers.Cookie = `${cookieName}=${cookieValue}`;
+    }
+  } catch (err) {
+    console.error('Не удалось получить сессию sale у Тильды:', err.message);
+    // пробуем без куки — вдруг всё же хватит Basic Auth
+  }
+
+  const upstream = await fetch(url, { headers });
   const xmlText = await upstream.text();
 
   console.log('--- RAW XML от Тильды (type=sale&mode=query) ---');
