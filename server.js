@@ -137,8 +137,28 @@ async function tildaSaleCheckAuth() {
   return { cookieName: lines[1], cookieValue: lines[2] };
 }
 
+// Последняя порция заказов, которую мы забрали у Тильды, но 1С ещё НЕ подтвердила
+// приём (не прислала mode=success). Тильда отдаёт каждый заказ только один раз,
+// поэтому держим порцию у себя и переотдаём её при повторных query — иначе при
+// любом сбое импорта в 1С заказы теряются навсегда.
+let pendingSaleXml = null;
+
+function hasOrders(xmlText) {
+  return typeof xmlText === 'string' && xmlText.includes('<Документ');
+}
+
 // Забираем настоящий XML заказов у Тильды и подменяем в нём данные покупателя
 async function handleSaleQuery(req, res) {
+  // Если прошлая порция ещё не подтверждена 1С — отдаём её снова, к Тильде не идём
+  if (pendingSaleXml) {
+    console.log('Есть неподтверждённая порция заказов — отдаю её повторно, Тильду не трогаю');
+    const patchedAgain = patchOrdersXml(pendingSaleXml, store);
+    return res
+      .status(200)
+      .set('Content-Type', 'application/xml; charset=utf-8')
+      .send(patchedAgain);
+  }
+
   const url = new URL(TILDA_URL);
   url.searchParams.set('type', 'sale');
   url.searchParams.set('mode', 'query');
@@ -162,7 +182,16 @@ async function handleSaleQuery(req, res) {
   console.log(xmlText);
   console.log('--- конец RAW XML ---');
 
+  if (hasOrders(xmlText)) {
+    pendingSaleXml = xmlText;
+    console.log('Запомнил порцию заказов до подтверждения от 1С');
+  } else {
+    console.log('Тильда вернула пустой список заказов (новых нет)');
+  }
+
   const patched = patchOrdersXml(xmlText, store);
+
+  console.log('Отдаю 1С XML, длина:', Buffer.byteLength(patched, 'utf8'), 'байт');
 
   res.status(upstream.status).set('Content-Type', 'application/xml; charset=utf-8').send(patched);
 }
@@ -179,7 +208,15 @@ app.all('/connectors/commerceml/', checkAuth, async (req, res) => {
     if (type === 'sale' && mode === 'query') {
       return await handleSaleQuery(req, res);
     }
-    // checkauth, success и всё остальное — просто пробрасываем настоящей Тильде
+    if (type === 'sale' && mode === 'success') {
+      // 1С подтвердила, что приняла порцию — только теперь можно её забыть
+      if (pendingSaleXml) {
+        console.log('1С подтвердила приём заказов — очищаю кэш порции');
+        pendingSaleXml = null;
+      }
+      return await proxyToTilda(req, res);
+    }
+    // checkauth и всё остальное — просто пробрасываем настоящей Тильде
     return await proxyToTilda(req, res);
   } catch (err) {
     console.error('Ошибка обработки запроса от 1С:', err);
