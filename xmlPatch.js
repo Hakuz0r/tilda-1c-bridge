@@ -45,26 +45,46 @@ function patchDocBlock(docBlock, captured) {
     ? (captured.orgName || captured.name)
     : captured.name;
 
-  return docBlock.replace(/<Контрагенты>[\s\S]*?<\/Контрагенты>/, (block) => {
-    let out = block;
+  let out = docBlock.replace(/<Контрагенты>[\s\S]*?<\/Контрагенты>/, (block) => {
+    let inner = block;
 
     if (buyerName) {
       const safeName = escapeXml(buyerName);
-      out = out.replace(
+      inner = inner.replace(
         /<Наименование>[^<]*<\/Наименование>/g,
         '<Наименование>' + safeName + '</Наименование>'
       );
-      out = out.replace(
+      inner = inner.replace(
         /<ПолноеНаименование>[^<]*<\/ПолноеНаименование>/g,
         '<ПолноеНаименование>' + safeName + '</ПолноеНаименование>'
       );
     }
 
-    if (captured.email) out = replaceContact(out, 'Почта', captured.email);
-    if (captured.phone) out = replaceContact(out, 'Телефон', captured.phone);
+    if (captured.email) inner = replaceContact(inner, 'Почта', captured.email);
+    if (captured.phone) inner = replaceContact(inner, 'Телефон', captured.phone);
 
-    return out;
+    return inner;
   });
+
+  // Способ оплаты: тег "Метод оплаты" в XML от Тильды уже существует, но там
+  // всегда дефолтное значение аккаунта, а не то, что реально выбрал покупатель.
+  // Пока уверенно распознаём только оплату наличными — маппинг для карты ещё
+  // не пойман (см. paymentSystem в вебхуке), поэтому остальные значения не трогаем,
+  // чтобы не подставить туда неверный текст.
+  if (captured.paymentSystem === 'cash') {
+    out = replaceReqValue(out, 'Метод оплаты', 'Наличные');
+  }
+
+  return out;
+}
+
+// Меняем <Значение> у конкретного <ЗначениеРеквизита> по имени в <Наименование>,
+// не трогая остальные реквизиты в списке
+function replaceReqValue(block, reqName, newValue) {
+  const re = new RegExp(
+    '(<ЗначениеРеквизита>\\s*<Наименование>' + reqName + '</Наименование>\\s*<Значение>)[^<]*(</Значение>)'
+  );
+  return block.replace(re, '$1' + escapeXml(newValue) + '$2');
 }
 
 // Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
