@@ -4,6 +4,17 @@
 // Это принципиально: именно такой XML 1С уже умеет импортировать (проверено —
 // прямой обмен Тильда->1С работал), а пересобранный ломал импорт.
 
+// Маска телефона в 1С не принимает скобки, дефисы и пробелы — проверено вручную
+// в карточке контрагента: "+7 (999) 999-99-88" не сохраняется, а "79999999988"
+// сохраняется нормально. Поэтому перед подстановкой чистим номер до цифр.
+function normalizePhone(phone) {
+  let digits = String(phone).replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('8')) {
+    digits = '7' + digits.slice(1);
+  }
+  return digits;
+}
+
 function escapeXml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -61,7 +72,7 @@ function patchDocBlock(docBlock, captured) {
     }
 
     if (captured.email) inner = replaceContact(inner, 'Почта', captured.email);
-    if (captured.phone) inner = replaceContact(inner, 'Телефон', captured.phone);
+    if (captured.phone) inner = replaceContact(inner, 'Телефон', normalizePhone(captured.phone));
 
     return inner;
   });
