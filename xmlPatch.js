@@ -1,108 +1,79 @@
-// Здесь мы берём НАСТОЯЩИЙ XML заказа, который отдаёт Тильда (там уже верно всё,
-// кроме данных о покупателе), и точечно подменяем блок покупателя на то, что
-// реально поймал наш вебхук.
-//
-// ВАЖНО: названия тегов ниже (Контрагенты/Контрагент/Наименование/Контакты и т.д.)
-// соответствуют стандартной схеме CommerceML v2. Это наиболее распространённый вариант,
-// но точные названия тегов, которые использует конкретно ваша 1С, мы увидим только
-// после первого реального запроса (он логируется в консоль на Render — вкладка Logs).
-// Если после первого теста поля покупателя не подтянутся — открой Logs, найди блок
-// "RAW XML от Тильды" и пришли его мне, поправлю теги под реальную структуру за 5 минут.
+// Берём СЫРОЙ XML от Тильды и точечно заменяем в нём только значения данных
+// покупателя. Никакого разбора в объект и пересборки: структура, отступы,
+// форматирование чисел — всё остаётся ровно таким, каким его прислала Тильда.
+// Это принципиально: именно такой XML 1С уже умеет импортировать (проверено —
+// прямой обмен Тильда->1С работал), а пересобранный ломал импорт.
 
-const { XMLParser, XMLBuilder } = require('fast-xml-parser');
-
-const parserOptions = {
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  textNodeName: '#text',
-};
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
 
 function patchOrdersXml(xmlText, store) {
+  if (typeof xmlText !== 'string' || !xmlText.includes('<Документ')) {
+    return xmlText;
+  }
+
   try {
-    const parser = new XMLParser(parserOptions);
-    const doc = parser.parse(xmlText);
+    return xmlText.replace(/<Документ>[\s\S]*?<\/Документ>/g, (docBlock) => {
+      const idMatch = docBlock.match(/<Ид>([^<]*)<\/Ид>/);
+      const orderId = idMatch ? idMatch[1].trim() : null;
+      if (!orderId) return docBlock;
 
-    const root = doc['КоммерческаяИнформация'];
-    if (!root) {
-      console.warn('XML не похож на CommerceML, отдаю как есть');
-      return xmlText;
-    }
-
-    let documents = root['Документ'];
-    if (!documents) return xmlText;
-
-    const wasArray = Array.isArray(documents);
-    if (!wasArray) documents = [documents];
-
-    for (const document of documents) {
-      const orderId = document['Ид'] ?? document['Номер'];
       const captured = store.getOrder(orderId);
       if (!captured) {
         console.log('Для заказа', orderId, 'вебхук не поймали — оставляю как есть');
-        continue;
+        return docBlock;
       }
-      patchOneDocument(document, captured);
+
+      const patched = patchDocBlock(docBlock, captured);
       console.log('Заказ', orderId, 'подменил данными покупателя из вебхука');
-    }
-
-    root['Документ'] = wasArray ? documents : documents[0];
-
-    const builder = new XMLBuilder({ ...parserOptions, format: true });
-    return '<?xml version="1.0" encoding="UTF-8"?>\n' + builder.build(doc);
+      return patched;
+    });
   } catch (err) {
     console.error('Не удалось пропатчить XML, отдаю оригинал без изменений:', err);
     return xmlText;
   }
 }
 
-function patchOneDocument(document, captured) {
-  const buyerName = captured.isLegal ? (captured.orgName || captured.name) : captured.name;
+function patchDocBlock(docBlock, captured) {
+  const buyerName = captured.isLegal
+    ? (captured.orgName || captured.name)
+    : captured.name;
 
-  let contragents = document['Контрагенты'] && document['Контрагенты']['Контрагент'];
-  if (contragents) {
-    const wasArray = Array.isArray(contragents);
-    if (!wasArray) contragents = [contragents];
+  return docBlock.replace(/<Контрагенты>[\s\S]*?<\/Контрагенты>/, (block) => {
+    let out = block;
 
-    for (const c of contragents) {
-      if (buyerName) {
-        c['Наименование'] = buyerName;
-        c['ПолноеНаименование'] = buyerName;
-      }
-      if (captured.isLegal && captured.inn) {
-        c['ИНН'] = captured.inn;
-      }
-
-      let contacts = c['Контакты'] && c['Контакты']['Контакт'];
-      if (contacts) {
-        const contactsWasArray = Array.isArray(contacts);
-        if (!contactsWasArray) contacts = [contacts];
-
-        for (const contact of contacts) {
-          if (contact['Тип'] === 'Почта' && captured.email) contact['Значение'] = captured.email;
-          if (contact['Тип'] === 'Телефон' && captured.phone) contact['Значение'] = captured.phone;
-        }
-        c['Контакты']['Контакт'] = contactsWasArray ? contacts : contacts[0];
-      }
+    if (buyerName) {
+      const safeName = escapeXml(buyerName);
+      out = out.replace(
+        /<Наименование>[^<]*<\/Наименование>/g,
+        '<Наименование>' + safeName + '</Наименование>'
+      );
+      out = out.replace(
+        /<ПолноеНаименование>[^<]*<\/ПолноеНаименование>/g,
+        '<ПолноеНаименование>' + safeName + '</ПолноеНаименование>'
+      );
     }
-    document['Контрагенты']['Контрагент'] = wasArray ? contragents : contragents[0];
-  }
 
-  let values = document['Значения'] && document['Значения']['ЗначениеРеквизита'];
-  if (values) {
-    const wasArray = Array.isArray(values);
-    if (!wasArray) values = [values];
+    if (captured.email) out = replaceContact(out, 'Почта', captured.email);
+    if (captured.phone) out = replaceContact(out, 'Телефон', captured.phone);
 
-    for (const v of values) {
-      const label = String(v['Наименование'] || '').toLowerCase();
-      if (label.includes('адрес') && captured.address) {
-        v['Значение'] = captured.address;
-      }
-      if (label.includes('оплат') && captured.paymentSystem) {
-        v['Значение'] = captured.paymentSystem === 'cash' ? 'Наличными при получении' : 'Оплата картой';
-      }
-    }
-    document['Значения']['ЗначениеРеквизита'] = wasArray ? values : values[0];
-  }
+    return out;
+  });
+}
+
+// Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
+function replaceContact(block, type, value) {
+  const re = new RegExp(
+    '(<Контакт>\\s*<Тип>' + type + '</Тип>\\s*<Значение>)[^<]*(</Значение>)',
+    'g'
+  );
+  return block.replace(re, '$1' + escapeXml(value) + '$2');
 }
 
 module.exports = { patchOrdersXml };
