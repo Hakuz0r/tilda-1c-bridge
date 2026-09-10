@@ -76,6 +76,13 @@ function patchDocBlock(docBlock, captured) {
       const normalized = normalizePhone(captured.phone);
       console.log('Телефон: из вебхука', captured.phone, '-> подставляю', normalized);
       inner = replaceContact(inner, 'Телефон', normalized);
+
+      // ДИАГНОСТИКА: 1С понимает <Тип>Почта</Тип>, но игнорирует <Тип>Телефон</Тип>
+      // при одинаковой структуре блоков. Похоже, типовой обмен ждёт конкретное
+      // значение из справочника CommerceML, а не общее "Телефон". Дублируем контакт
+      // с типом "ТелефонРабочий" — если номер появится в 1С, значит причина в этом.
+      inner = addPhoneContactVariant(inner, 'ТелефонРабочий', normalized);
+
       const check = inner.match(/<Тип>Телефон<\/Тип>\s*<Значение>([^<]*)<\/Значение>/);
       console.log('Телефон в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
     }
@@ -104,6 +111,24 @@ function replaceReqValue(block, reqName, newValue) {
     '(<ЗначениеРеквизита>\\s*<Наименование>' + reqName + '</Наименование>\\s*<Значение>)[^<]*(</Значение>)'
   );
   return block.replace(re, '$1' + escapeXml(newValue) + '$2');
+}
+
+// Вставляем ещё один <Контакт> сразу после существующего телефонного, повторяя
+// его отступы, чтобы форматирование XML осталось прежним
+function addPhoneContactVariant(block, type, value) {
+  const re = /([ \t]*)<Контакт>(\s*)<Тип>Телефон<\/Тип>[\s\S]*?<\/Контакт>/;
+  const m = block.match(re);
+  if (!m) return block;
+
+  const indent = m[1];
+  const innerIndent = indent + ' ';
+  const extra =
+    '\n' + indent + '<Контакт>' +
+    '\n' + innerIndent + '<Тип>' + type + '</Тип>' +
+    '\n' + innerIndent + '<Значение>' + escapeXml(value) + '</Значение>' +
+    '\n' + indent + '</Контакт>';
+
+  return block.replace(re, m[0] + extra);
 }
 
 // Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
