@@ -72,7 +72,13 @@ function patchDocBlock(docBlock, captured) {
     }
 
     if (captured.email) inner = replaceContact(inner, 'Почта', captured.email);
-    if (captured.phone) inner = replaceContact(inner, 'Телефон', normalizePhone(captured.phone));
+    if (captured.phone) {
+      const normalized = normalizePhone(captured.phone);
+      console.log('Телефон: из вебхука', captured.phone, '-> подставляю', normalized);
+      inner = replaceContact(inner, 'Телефон', normalized);
+      const check = inner.match(/<Тип>Телефон<\/Тип>\s*<Значение>([^<]*)<\/Значение>/);
+      console.log('Телефон в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
+    }
 
     return inner;
   });
