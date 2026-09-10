@@ -73,6 +73,8 @@ function patchDocBlock(docBlock, captured) {
   // чтобы не подставить туда неверный текст.
   if (captured.paymentSystem === 'cash') {
     out = replaceReqValue(out, 'Метод оплаты', 'Наличные');
+    const check = out.match(/<Наименование>Метод оплаты<\/Наименование>\s*<Значение>([^<]*)<\/Значение>/);
+    console.log('Метод оплаты в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
   }
 
   return out;
