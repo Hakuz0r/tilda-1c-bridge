@@ -85,11 +85,13 @@ function patchDocBlock(docBlock, captured) {
       console.log('Телефон в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
     }
 
-    // Адрес доставки: в XML от Тильды такого узла нет вообще, поэтому вставляем
-    // новый <Адрес> перед <Контакты> — это его штатное место по схеме CommerceML.
+    // Адрес доставки: узел <Адрес> отдельно от <Контакты> 1С не подхватила (проверено
+    // на практике). По аналогии с телефоном (сработал только конкретный <Тип>
+    // "ТелефонРабочий", а не общий "Телефон") пробуем класть адрес тоже как
+    // <Контакт> внутри <Контакты>, с типом "Адрес".
     if (captured.address) {
-      inner = addAddress(inner, captured.address);
-      const check = inner.match(/<Адрес>\s*<Представление>([^<]*)<\/Представление>/);
+      inner = addContact(inner, 'Адрес', captured.address);
+      const check = inner.match(/<Тип>Адрес<\/Тип>\s*<Значение>([^<]*)<\/Значение>/);
       console.log('Адрес в отправляемом XML теперь:', check ? check[1] : '(не вставился)');
     }
 
@@ -119,22 +121,22 @@ function replaceReqValue(block, reqName, newValue) {
   return block.replace(re, '$1' + escapeXml(newValue) + '$2');
 }
 
-// Вставляем <Адрес> перед <Контакты>, повторяя отступы соседних узлов,
-// чтобы форматирование XML осталось прежним
-function addAddress(block, address) {
-  const re = /([ \t]*)<Контакты>/;
-  const m = block.match(re);
-  if (!m) return block;
-
-  const indent = m[1];
+// Вставляем новый <Контакт> перед закрывающим </Контакты>, повторяя отступы
+// уже существующих контактов, чтобы форматирование XML осталось прежним
+function addContact(block, type, value) {
+  const contactRe = /([ \t]*)<Контакт>/;
+  const m = block.match(contactRe);
+  const indent = m ? m[1] : '     ';
   const innerIndent = indent + ' ';
+
   const node =
-    indent + '<Адрес>' +
-    '\n' + innerIndent + '<Представление>' + escapeXml(address) + '</Представление>' +
-    '\n' + indent + '</Адрес>' +
+    indent + '<Контакт>' +
+    '\n' + innerIndent + '<Тип>' + type + '</Тип>' +
+    '\n' + innerIndent + '<Значение>' + escapeXml(value) + '</Значение>' +
+    '\n' + indent + '</Контакт>' +
     '\n';
 
-  return block.replace(re, node + m[0]);
+  return block.replace(/([ \t]*)<\/Контакты>/, node + '$1</Контакты>');
 }
 
 // Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
