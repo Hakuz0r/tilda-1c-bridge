@@ -74,17 +74,23 @@ function patchDocBlock(docBlock, captured) {
     if (captured.email) inner = replaceContact(inner, 'Почта', captured.email);
     if (captured.phone) {
       const normalized = normalizePhone(captured.phone);
-      console.log('Телефон: из вебхука', captured.phone, '-> подставляю', normalized);
-      inner = replaceContact(inner, 'Телефон', normalized);
-
-      // ДИАГНОСТИКА: 1С понимает <Тип>Почта</Тип>, но игнорирует <Тип>Телефон</Тип>
-      // при одинаковой структуре блоков. Похоже, типовой обмен ждёт конкретное
-      // значение из справочника CommerceML, а не общее "Телефон". Дублируем контакт
-      // с типом "ТелефонРабочий" — если номер появится в 1С, значит причина в этом.
-      inner = addPhoneContactVariant(inner, 'ТелефонРабочий', normalized);
-
-      const check = inner.match(/<Тип>Телефон<\/Тип>\s*<Значение>([^<]*)<\/Значение>/);
+      // Проверено на практике: 1С игнорирует <Тип>Телефон</Тип>, который присылает
+      // Тильда, но корректно принимает <Тип>ТелефонРабочий</Тип>. Поэтому у контакта
+      // меняем и тип, и значение.
+      inner = inner.replace(
+        /(<Контакт>\s*<Тип>)Телефон(<\/Тип>\s*<Значение>)[^<]*(<\/Значение>)/,
+        '$1ТелефонРабочий$2' + escapeXml(normalized) + '$3'
+      );
+      const check = inner.match(/<Тип>ТелефонРабочий<\/Тип>\s*<Значение>([^<]*)<\/Значение>/);
       console.log('Телефон в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
+    }
+
+    // Адрес доставки: в XML от Тильды такого узла нет вообще, поэтому вставляем
+    // новый <Адрес> перед <Контакты> — это его штатное место по схеме CommerceML.
+    if (captured.address) {
+      inner = addAddress(inner, captured.address);
+      const check = inner.match(/<Адрес>\s*<Представление>([^<]*)<\/Представление>/);
+      console.log('Адрес в отправляемом XML теперь:', check ? check[1] : '(не вставился)');
     }
 
     return inner;
@@ -113,22 +119,22 @@ function replaceReqValue(block, reqName, newValue) {
   return block.replace(re, '$1' + escapeXml(newValue) + '$2');
 }
 
-// Вставляем ещё один <Контакт> сразу после существующего телефонного, повторяя
-// его отступы, чтобы форматирование XML осталось прежним
-function addPhoneContactVariant(block, type, value) {
-  const re = /([ \t]*)<Контакт>(\s*)<Тип>Телефон<\/Тип>[\s\S]*?<\/Контакт>/;
+// Вставляем <Адрес> перед <Контакты>, повторяя отступы соседних узлов,
+// чтобы форматирование XML осталось прежним
+function addAddress(block, address) {
+  const re = /([ \t]*)<Контакты>/;
   const m = block.match(re);
   if (!m) return block;
 
   const indent = m[1];
   const innerIndent = indent + ' ';
-  const extra =
-    '\n' + indent + '<Контакт>' +
-    '\n' + innerIndent + '<Тип>' + type + '</Тип>' +
-    '\n' + innerIndent + '<Значение>' + escapeXml(value) + '</Значение>' +
-    '\n' + indent + '</Контакт>';
+  const node =
+    indent + '<Адрес>' +
+    '\n' + innerIndent + '<Представление>' + escapeXml(address) + '</Представление>' +
+    '\n' + indent + '</Адрес>' +
+    '\n';
 
-  return block.replace(re, m[0] + extra);
+  return block.replace(re, node + m[0]);
 }
 
 // Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
