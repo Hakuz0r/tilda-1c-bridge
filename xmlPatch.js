@@ -24,6 +24,26 @@ function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
+function paymentLabel(captured) {
+  if (captured.paymentSystem === 'cash') return 'Наличные';
+  return captured.paymentSystem || 'не указан';
+}
+
+// Сводка по всем полям заказа для комментария — чтобы не лазить по карточкам
+// контрагента и вкладкам, всё видно сразу при открытии заказа. Формат — простой
+// построчный список "Поле: значение", строки без значения просто пропускаются.
+function buildSummary(captured) {
+  const lines = [];
+  if (captured.name) lines.push('Имя: ' + captured.name);
+  if (captured.isLegal && captured.orgName) lines.push('Название организации: ' + captured.orgName);
+  if (captured.isLegal && captured.inn) lines.push('ИНН: ' + captured.inn);
+  if (captured.phone) lines.push('Телефон: ' + captured.phone);
+  if (captured.email) lines.push('Email: ' + captured.email);
+  if (captured.address) lines.push('Адрес: ' + captured.address);
+  lines.push('Способ оплаты: ' + paymentLabel(captured));
+  return lines.join('\n');
+}
+
 function patchOrdersXml(xmlText, store) {
   if (typeof xmlText !== 'string' || !xmlText.includes('<Документ')) {
     return xmlText;
@@ -85,29 +105,39 @@ function patchDocBlock(docBlock, captured) {
       console.log('Телефон в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
     }
 
+    // ИНН — стандартный тег схемы CommerceML прямо внутри <Контрагент> (не внутри
+    // <Контакты>), поэтому вставляем его как обычный дочерний элемент, а не как
+    // контакт. Только для юр.лиц, и только если ИНН реально пришёл в вебхуке.
+    if (captured.isLegal && captured.inn) {
+      inner = inner.replace(/([ \t]*)(<Роль>)/, (full, indent, tag) => {
+        return indent + '<ИНН>' + escapeXml(captured.inn) + '</ИНН>\n' + indent + tag;
+      });
+      const check = inner.match(/<ИНН>([^<]*)<\/ИНН>/);
+      console.log('ИНН в отправляемом XML теперь:', check ? check[1] : '(не вставился)');
+    }
+
     return inner;
   });
 
-  // Адрес доставки: тип "Адрес" в контактах 1С оказался структурированным полем
-  // (страна/город/улица/дом/индекс с адресным классификатором), простая строка
-  // туда не ложится — проверено на практике, поле осталось пустым. Кладём адрес
-  // в комментарий заказа: это обычное текстовое поле без всякой структуры,
-  // гарантированно отображается как есть.
-  if (captured.address) {
-    out = out.replace(/<Комментарий>([^<]*)<\/Комментарий>/, (m, existing) => {
-      const note = 'Адрес доставки: ' + captured.address;
-      const combined = existing && existing.trim() ? existing.trim() + ' | ' + note : note;
-      return '<Комментарий>' + escapeXml(combined) + '</Комментарий>';
-    });
-    const check = out.match(/<Комментарий>([^<]*)<\/Комментарий>/);
-    console.log('Комментарий заказа теперь:', check ? check[1] : '(тег не найден)');
-  }
+  // Сводка по всем полям — в комментарий заказа. Это обычное текстовое поле без
+  // всякой структуры и валидации, поэтому гарантированно отображается как есть,
+  // в отличие от структурированных полей вроде адреса (страна/город/улица/дом
+  // с классификатором) или доп.реквизитов, которые базовая версия 1С может
+  // просто не показать нигде в интерфейсе.
+  out = out.replace(/<Комментарий>([^<]*)<\/Комментарий>/, (m, existing) => {
+    const summary = buildSummary(captured);
+    const combined = existing && existing.trim() ? existing.trim() + '\n\n' + summary : summary;
+    return '<Комментарий>' + escapeXml(combined) + '</Комментарий>';
+  });
+  const commentCheck = out.match(/<Комментарий>([\s\S]*?)<\/Комментарий>/);
+  console.log('Комментарий заказа теперь:\n' + (commentCheck ? commentCheck[1] : '(тег не найден)'));
 
   // Способ оплаты: тег "Метод оплаты" в XML от Тильды уже существует, но там
   // всегда дефолтное значение аккаунта, а не то, что реально выбрал покупатель.
   // Пока уверенно распознаём только оплату наличными — маппинг для карты ещё
   // не пойман (см. paymentSystem в вебхуке), поэтому остальные значения не трогаем,
-  // чтобы не подставить туда неверный текст.
+  // чтобы не подставить туда неверный текст в само поле (в комментарии при этом
+  // значение всё равно видно, каким бы оно ни было).
   if (captured.paymentSystem === 'cash') {
     out = replaceReqValue(out, 'Метод оплаты', 'Наличные');
     const check = out.match(/<Наименование>Метод оплаты<\/Наименование>\s*<Значение>([^<]*)<\/Значение>/);
@@ -124,24 +154,6 @@ function replaceReqValue(block, reqName, newValue) {
     '(<ЗначениеРеквизита>\\s*<Наименование>' + reqName + '</Наименование>\\s*<Значение>)[^<]*(</Значение>)'
   );
   return block.replace(re, '$1' + escapeXml(newValue) + '$2');
-}
-
-// Вставляем новый <Контакт> перед закрывающим </Контакты>, повторяя отступы
-// уже существующих контактов, чтобы форматирование XML осталось прежним
-function addContact(block, type, value) {
-  const contactRe = /([ \t]*)<Контакт>/;
-  const m = block.match(contactRe);
-  const indent = m ? m[1] : '     ';
-  const innerIndent = indent + ' ';
-
-  const node =
-    indent + '<Контакт>' +
-    '\n' + innerIndent + '<Тип>' + type + '</Тип>' +
-    '\n' + innerIndent + '<Значение>' + escapeXml(value) + '</Значение>' +
-    '\n' + indent + '</Контакт>' +
-    '\n';
-
-  return block.replace(/([ \t]*)<\/Контакты>/, node + '$1</Контакты>');
 }
 
 // Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
