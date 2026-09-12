@@ -1,4 +1,6 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const store = require('./store');
 const { patchOrdersXml } = require('./xmlPatch');
@@ -25,6 +27,15 @@ app.get('/', (req, res) => {
 
 // ---------- Приём вебхука от формы заказа Тильды ----------
 app.post('/webhook/tilda-order', (req, res) => {
+  // ДИАГНОСТИКА карты: логируем ПОЛНОЕ сырое тело каждого входящего вебхука,
+  // с таймстампом, даже если ниже не найдётся orderid — иначе при оплате
+  // картой (заказ приходит в 1С пустым) невозможно понять, приходит вебхук
+  // вообще или нет, и что реально лежит в теле.
+  const receivedAt = new Date().toISOString();
+  console.log('--- Вебхук от Тильды получен', receivedAt, '---');
+  console.log(JSON.stringify(req.body));
+  console.log('--- конец тела вебхука ---');
+
   try {
     const body = req.body;
     let payment = {};
@@ -36,7 +47,7 @@ app.post('/webhook/tilda-order', (req, res) => {
 
     const orderId = payment.orderid;
     if (!orderId) {
-      console.warn('Вебхук без orderid, игнорирую:', body);
+      console.warn('Вебхук без orderid (получен', receivedAt + '), игнорирую — см. полное тело выше');
       return res.status(200).send('ok');
     }
 
@@ -147,6 +158,47 @@ function hasOrders(xmlText) {
   return typeof xmlText === 'string' && xmlText.includes('<Документ');
 }
 
+// Для диагностики адреса нужен реальный XML заказа с ПОЛНОСТЬЮ заполненными
+// полями (и физ-, и юрлица), чтобы увидеть блок <Значения> целиком. Считаем
+// заказ полностью заполненным, если пойманы все контактные поля (плюс ИНН и
+// название организации для юрлица).
+function isFullyFilled(captured) {
+  if (!captured) return false;
+  if (!(captured.phone && captured.email && captured.address)) return false;
+  if (captured.isLegal) return !!(captured.orgName && captured.inn);
+  return !!captured.name;
+}
+
+// Папка вне git (см. .gitignore) — просто складываем туда сырые XML таких
+// заказов на диск Render, чтобы забрать их потом (например, через Render Shell)
+// и прислать мне для разбора структуры полей.
+const RAW_ORDERS_DIR = path.join(__dirname, 'raw-orders');
+
+function saveRawOrderIfComplete(orderId, docBlock) {
+  const captured = store.getOrder(orderId);
+  if (!isFullyFilled(captured)) return;
+
+  try {
+    fs.mkdirSync(RAW_ORDERS_DIR, { recursive: true });
+    const file = path.join(RAW_ORDERS_DIR, orderId + '.xml');
+    fs.writeFileSync(file, docBlock);
+    console.log('Сохранил сырой XML полностью заполненного заказа', orderId, '->', file);
+  } catch (err) {
+    console.error('Не удалось сохранить сырой XML заказа', orderId, ':', err.message);
+  }
+}
+
+function extractDocuments(xmlText) {
+  const docs = [];
+  const re = /<Документ>[\s\S]*?<\/Документ>/g;
+  let m;
+  while ((m = re.exec(xmlText))) {
+    const idMatch = m[0].match(/<Ид>([^<]*)<\/Ид>/);
+    if (idMatch) docs.push({ orderId: idMatch[1].trim(), docBlock: m[0] });
+  }
+  return docs;
+}
+
 // Забираем настоящий XML заказов у Тильды и подменяем в нём данные покупателя
 async function handleSaleQuery(req, res) {
   // Если прошлая порция ещё не подтверждена 1С — отдаём её снова, к Тильде не идём
@@ -185,6 +237,7 @@ async function handleSaleQuery(req, res) {
   if (hasOrders(xmlText)) {
     pendingSaleXml = xmlText;
     console.log('Запомнил порцию заказов до подтверждения от 1С');
+    extractDocuments(xmlText).forEach(({ orderId, docBlock }) => saveRawOrderIfComplete(orderId, docBlock));
   } else {
     console.log('Тильда вернула пустой список заказов (новых нет)');
   }
