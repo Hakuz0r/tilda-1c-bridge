@@ -24,6 +24,73 @@ function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
+// Тильда отдаёт адрес одной строкой, а 1С не принимает его просто текстом в
+// <Представление> — это уже пробовали, поле оставалось пустым. По официальной
+// XSD CommerceML 2.10 у <Адрес> обязателен только <Представление>, но 1С
+// материализует контактную информацию лишь при наличии типизированных
+// <АдресноеПоле>. ФИАС-код при этом не нужен: схема разрешает произвольные
+// значения, поэтому разбираем строку эвристикой по запятым.
+// Допустимые <Тип> по схеме: Почтовый индекс, Страна, Регион, Район,
+// Населенный пункт, Город, Улица, Дом, Корпус, Квартира.
+const STREET_RE = /(улиц|ул\.|проспект|пр-?кт|пр-?т|переул|пер\.|шоссе|бульвар|б-р|набережн|наб\.|проезд|тракт|аллея|площад|пл\.|микрорайон|мкр)/i;
+const HOUSE_RE = /^(?:д\.?\s*)?(\d+[а-яё]?(?:\s*(?:к|корп|корпус)\.?\s*\d+)?)$/i;
+const FLAT_RE = /^(?:кв|квартира|оф|офис)\.?\s*(\S+)$/i;
+
+function parseAddressFields(address) {
+  const parts = String(address).split(',').map((p) => p.trim()).filter(Boolean);
+  const take = (predicate, fromEnd) => {
+    const index = fromEnd
+      ? [...parts.keys()].reverse().find((i) => predicate(parts[i]))
+      : [...parts.keys()].find((i) => predicate(parts[i]));
+    if (index === undefined) return null;
+    return parts.splice(index, 1)[0];
+  };
+
+  const zip = take((p) => /^\d{6}$/.test(p));
+  const flat = take((p) => FLAT_RE.test(p), true);
+  const house = take((p) => HOUSE_RE.test(p), true);
+  let street = take((p) => STREET_RE.test(p));
+  if (!street && parts.length > 1) street = parts.pop();
+  const city = parts.shift();
+
+  const fields = [['Страна', 'Россия']];
+  if (zip) fields.push(['Почтовый индекс', zip]);
+  if (city) fields.push(['Город', city]);
+  if (street) fields.push(['Улица', street]);
+  if (house) fields.push(['Дом', house.match(HOUSE_RE)[1]]);
+  if (flat) fields.push(['Квартира', flat.match(FLAT_RE)[1]]);
+  return fields;
+}
+
+function buildAddressNode(address, indent) {
+  const inner = indent + ' ';
+  const lines = [indent + '<Адрес>', inner + '<Представление>' + escapeXml(address) + '</Представление>'];
+  parseAddressFields(address).forEach(([type, value]) => {
+    lines.push(
+      inner + '<АдресноеПоле>',
+      inner + ' <Тип>' + type + '</Тип>',
+      inner + ' <Значение>' + escapeXml(value) + '</Значение>',
+      inner + '</АдресноеПоле>'
+    );
+  });
+  lines.push(indent + '</Адрес>');
+  return lines.join('\n') + '\n';
+}
+
+// По схеме <Адрес> стоит строго между <Комментарий> и <Контакты> внутри
+// <Контрагент>, поэтому вставляем его перед <Контакты> (или перед закрывающим
+// тегом контрагента, если контактов нет вообще).
+function patchOrAddAddress(block, address) {
+  const existing = /([ \t]*)<Адрес>[\s\S]*?<\/Адрес>\n?/;
+  const m = block.match(existing);
+  if (m) return block.replace(existing, buildAddressNode(address, m[1]));
+
+  const before = /([ \t]*)(<Контакты>|<\/Контрагент>)/;
+  const anchor = block.match(before);
+  if (!anchor) return block;
+  return block.replace(before, buildAddressNode(address, anchor[1]) + anchor[1] + anchor[2]);
+}
+
 function paymentLabel(captured) {
   if (captured.paymentSystem === 'cash') return 'Наличные';
   return captured.paymentSystem || 'не указан';
@@ -123,6 +190,12 @@ function patchDocBlock(docBlock, captured) {
       });
       const check = inner.match(/<ИНН>([^<]*)<\/ИНН>/);
       console.log('ИНН в отправляемом XML теперь:', check ? check[1] : '(не вставился)');
+    }
+
+    if (captured.address) {
+      inner = patchOrAddAddress(inner, captured.address);
+      const check = inner.match(/<Адрес>[\s\S]*?<\/Адрес>/);
+      console.log('Адрес контрагента в отправляемом XML теперь:\n' + (check ? check[0] : '(не вставился)'));
     }
 
     return inner;
