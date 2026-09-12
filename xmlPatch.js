@@ -15,6 +15,12 @@ function normalizePhone(phone) {
   return digits;
 }
 
+// Реквизиты документа лежат в <ЗначенияРеквизитов> (не <Значения> — этого тега в
+// XML Тильды нет вообще). Такой же блок есть внутри каждого <Товар>, поэтому
+// документный ищем как ПОСЛЕДНИЙ в блоке документа: он идёт после </Товары>.
+const DOC_REQ_BLOCK_RE = /<ЗначенияРеквизитов>(?:(?!<\/ЗначенияРеквизитов>)[\s\S])*<\/ЗначенияРеквизитов>(?![\s\S]*<\/ЗначенияРеквизитов>)/;
+const DOC_REQ_CLOSING_RE = /([ \t]*)<\/ЗначенияРеквизитов>(?![\s\S]*<\/ЗначенияРеквизитов>)/;
+
 function escapeXml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -143,10 +149,10 @@ function patchDocBlock(docBlock, captured) {
   // до всяких патчей — чтобы по логам Render можно было увидеть реальные имена
   // тегов, которые шлёт эта конкретная 1С/Тильда (аналогично тому, как уже виден
   // тег "Метод оплаты"), и понять, есть ли среди них готовый тег под адрес.
-  const valuesBlockMatch = docBlock.match(/<Значения>[\s\S]*?<\/Значения>/);
-  console.log('--- Блок <Значения> (реквизиты документа) ---');
-  console.log(valuesBlockMatch ? valuesBlockMatch[0] : '(блок <Значения> не найден)');
-  console.log('--- конец блока <Значения> ---');
+  const valuesBlockMatch = docBlock.match(DOC_REQ_BLOCK_RE);
+  console.log('--- Блок <ЗначенияРеквизитов> (реквизиты документа) ---');
+  console.log(valuesBlockMatch ? valuesBlockMatch[0] : '(блок не найден)');
+  console.log('--- конец блока <ЗначенияРеквизитов> ---');
 
   const buyerName = captured.isLegal
     ? (captured.orgName || captured.name)
@@ -268,13 +274,16 @@ function patchOrAddAddressReq(block, address) {
   return addReqValue(block, reqName, address);
 }
 
-// Вставляем новый <ЗначениеРеквизита> перед закрывающим </Значения>, повторяя
-// отступы уже существующих реквизитов, чтобы форматирование XML осталось прежним
+// Вставляем новый <ЗначениеРеквизита> перед закрывающим тегом реквизитов
+// документа, повторяя отступы существующих узлов, чтобы форматирование осталось
+// прежним. Закрывающий тег берём ПОСЛЕДНИЙ в блоке документа: такой же блок
+// <ЗначенияРеквизитов> есть внутри каждого <Товар>, и попасть надо не в него.
 function addReqValue(block, reqName, value) {
-  const indentMatch = block.match(/([ \t]*)<ЗначениеРеквизита>/);
-  const indent = indentMatch ? indentMatch[1] : '     ';
-  const innerIndent = indent + ' ';
+  const closing = block.match(DOC_REQ_CLOSING_RE);
+  if (!closing) return block;
 
+  const indent = closing[1] + ' ';
+  const innerIndent = indent + ' ';
   const node =
     indent + '<ЗначениеРеквизита>' +
     '\n' + innerIndent + '<Наименование>' + escapeXml(reqName) + '</Наименование>' +
@@ -282,7 +291,7 @@ function addReqValue(block, reqName, value) {
     '\n' + indent + '</ЗначениеРеквизита>' +
     '\n';
 
-  return block.replace(/([ \t]*)<\/Значения>/, node + '$1</Значения>');
+  return block.replace(DOC_REQ_CLOSING_RE, node + closing[0]);
 }
 
 // Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
