@@ -249,6 +249,27 @@ async function handleSaleQuery(req, res) {
   res.status(upstream.status).set('Content-Type', 'application/xml; charset=utf-8').send(patched);
 }
 
+// ---------- Временная диагностика: просмотр сырых XML заказов из raw-orders ----------
+// Тот же логин/пароль, что и у 1С (checkAuth), чтобы не городить отдельный секрет.
+// Убрать после того, как разберёмся со структурой полей адреса.
+app.get('/debug/raw-orders', checkAuth, (req, res) => {
+  try {
+    const files = fs.readdirSync(RAW_ORDERS_DIR);
+    res.type('text/plain').send(files.join('\n') || '(папка пуста)');
+  } catch (err) {
+    res.type('text/plain').send('Папка raw-orders ещё не создана: ' + err.message);
+  }
+});
+
+app.get('/debug/raw-orders/:orderId', checkAuth, (req, res) => {
+  const file = path.join(RAW_ORDERS_DIR, req.params.orderId + '.xml');
+  try {
+    res.type('text/plain').send(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    res.status(404).type('text/plain').send('Не нашёл файл для заказа ' + req.params.orderId + ': ' + err.message);
+  }
+});
+
 // ---------- Эндпоинт, на который смотрит 1С ----------
 app.all('/connectors/commerceml/', checkAuth, async (req, res) => {
   const { type, mode } = req.query;
