@@ -178,9 +178,11 @@ function saveRawOrderIfComplete(orderId, docBlock) {
   const captured = store.getOrder(orderId);
   if (!isFullyFilled(captured)) return;
 
+  const file = path.join(RAW_ORDERS_DIR, orderId + '.xml');
+  if (fs.existsSync(file)) return;
+
   try {
     fs.mkdirSync(RAW_ORDERS_DIR, { recursive: true });
-    const file = path.join(RAW_ORDERS_DIR, orderId + '.xml');
     fs.writeFileSync(file, docBlock);
     console.log('Сохранил сырой XML полностью заполненного заказа', orderId, '->', file);
   } catch (err) {
@@ -204,6 +206,10 @@ async function handleSaleQuery(req, res) {
   // Если прошлая порция ещё не подтверждена 1С — отдаём её снова, к Тильде не идём
   if (pendingSaleXml) {
     console.log('Есть неподтверждённая порция заказов — отдаю её повторно, Тильду не трогаю');
+    // Данные из вебхука могли доехать ПОСЛЕ первого запроса к Тильде (когда файл
+    // ещё не сохранился, т.к. store был пуст) — поэтому пробуем сохранить сырой
+    // XML на каждой повторной отдаче тоже, пока 1С не подтвердит приём.
+    extractDocuments(pendingSaleXml).forEach(({ orderId, docBlock }) => saveRawOrderIfComplete(orderId, docBlock));
     const patchedAgain = patchOrdersXml(pendingSaleXml, store);
     return res
       .status(200)
