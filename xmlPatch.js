@@ -1,12 +1,7 @@
-// Берём СЫРОЙ XML от Тильды и точечно заменяем в нём только значения данных
-// покупателя. Никакого разбора в объект и пересборки: структура, отступы,
-// форматирование чисел — всё остаётся ровно таким, каким его прислала Тильда.
-// Это принципиально: именно такой XML 1С уже умеет импортировать (проверено —
-// прямой обмен Тильда->1С работал), а пересобранный ломал импорт.
+// Патчим СЫРОЙ XML Тильды точечными заменами, без разбора и пересборки: именно
+// такой XML 1С умеет импортировать, пересобранный ломал импорт.
 
-// Маска телефона в 1С не принимает скобки, дефисы и пробелы — проверено вручную
-// в карточке контрагента: "+7 (999) 999-99-88" не сохраняется, а "79999999988"
-// сохраняется нормально. Поэтому перед подстановкой чистим номер до цифр.
+// Маска телефона в 1С принимает только цифры: "+7 (999) 999-99-88" не сохраняется.
 function normalizePhone(phone) {
   let digits = String(phone).replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('8')) {
@@ -14,12 +9,6 @@ function normalizePhone(phone) {
   }
   return digits;
 }
-
-// Реквизиты документа лежат в <ЗначенияРеквизитов> (не <Значения> — этого тега в
-// XML Тильды нет вообще). Такой же блок есть внутри каждого <Товар>, поэтому
-// документный ищем как ПОСЛЕДНИЙ в блоке документа: он идёт после </Товары>.
-const DOC_REQ_BLOCK_RE = /<ЗначенияРеквизитов>(?:(?!<\/ЗначенияРеквизитов>)[\s\S])*<\/ЗначенияРеквизитов>(?![\s\S]*<\/ЗначенияРеквизитов>)/;
-const DOC_REQ_CLOSING_RE = /([ \t]*)<\/ЗначенияРеквизитов>(?![\s\S]*<\/ЗначенияРеквизитов>)/;
 
 function escapeXml(value) {
   return String(value)
@@ -30,48 +19,122 @@ function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
-// Тильда отдаёт адрес одной строкой, а 1С не принимает его просто текстом в
-// <Представление> — это уже пробовали, поле оставалось пустым. По официальной
-// XSD CommerceML 2.10 у <Адрес> обязателен только <Представление>, но 1С
-// материализует контактную информацию лишь при наличии типизированных
-// <АдресноеПоле>. ФИАС-код при этом не нужен: схема разрешает произвольные
-// значения, поэтому разбираем строку эвристикой по запятым.
-// Допустимые <Тип> по схеме: Почтовый индекс, Страна, Регион, Район,
-// Населенный пункт, Город, Улица, Дом, Корпус, Квартира.
-const STREET_RE = /(улиц|ул\.|проспект|пр-?кт|пр-?т|переул|пер\.|шоссе|бульвар|б-р|набережн|наб\.|проезд|тракт|аллея|площад|пл\.|микрорайон|мкр)/i;
-const HOUSE_RE = /^(?:д\.?\s*)?(\d+[а-яё]?(?:\s*(?:к|корп|корпус)\.?\s*\d+)?)$/i;
-const FLAT_RE = /^(?:кв|квартира|оф|офис)\.?\s*(\S+)$/i;
+const capitalize = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
+// 1С материализует адрес контрагента только при наличии типизированных
+// <АдресноеПоле> (одного <Представление> мало), а Тильда отдаёт адрес одной
+// строкой, которую покупатель пишет как угодно — с запятыми или без. Поэтому
+// сначала вынимаем однозначные части (индекс, кв., корп., дом), затем улицу по
+// слову-типу, а остаток считаем городом.
+//
+// 1С сама дописывает тип к значению: Город "X" -> "X г", Улица "X" -> "X ул",
+// Дом "N" -> "дом № N". Поэтому "г." и "ул." из ввода убираем, иначе в печати
+// выйдет "г. Москва г". Прочие типы улиц ("проспект") оставляем как есть: как
+// 1С отрисует их иначе, не проверено.
+const BOUNDARY = '(?:^|[\\s,])';
+const END = '(?=$|[\\s,])';
+const NUMBER = '\\d+[а-яё]?(?:\\/\\d+)?';
+
+const ZIP_RE = new RegExp(BOUNDARY + '(\\d{6})' + END);
+const REGION_RE = new RegExp(
+  BOUNDARY + '([а-яё-]+(?:ая|ий|ой|ый)\\s+(?:обл|область|край)\\.?|(?:обл|область|край)\\.?\\s+[а-яё-]+(?:ая|ий|ой|ый))' + END,
+  'i'
+);
+const FLAT_RE = new RegExp(BOUNDARY + '(?:кв|квартира)\\.?\\s*(' + NUMBER + ')' + END, 'i');
+const OFFICE_RE = new RegExp(BOUNDARY + '(оф|офис|пом|помещение)\\.?\\s*(' + NUMBER + ')' + END, 'i');
+const BUILDING_RE = new RegExp(BOUNDARY + '(?:к|корп|корпус)\\.?\\s*(\\d+[а-яё]?)' + END, 'i');
+const HOUSE_RE = new RegExp(BOUNDARY + '(?:д|дом)\\.?\\s*(' + NUMBER + ')' + END, 'i');
+const BARE_NUMBER_RE = new RegExp(BOUNDARY + '(' + NUMBER + ')' + END, 'gi');
+const CITY_PREFIX_RE = /^(?:г|гор|город)\.?\s+/i;
+const COUNTRY_RE = /^(?:россия|рф|российская федерация)$/i;
+
+const STREET_TYPES = new Set([
+  'ул', 'улица', 'пр', 'пр-т', 'пр-кт', 'просп', 'проспект', 'пер', 'переулок',
+  'ш', 'шоссе', 'б-р', 'бульвар', 'наб', 'набережная', 'проезд', 'пр-д', 'тракт',
+  'аллея', 'пл', 'площадь', 'мкр', 'микрорайон', 'туп', 'тупик', 'линия',
+]);
+const isPlainStreetType = (word) => /^(?:ул|улица)$/i.test(word);
+const streetTypeOf = (token) => token.toLowerCase().replace(/\.$/, '');
 
 function parseAddressFields(address) {
-  const parts = String(address).split(',').map((p) => p.trim()).filter(Boolean);
-  const take = (predicate, fromEnd) => {
-    const index = fromEnd
-      ? [...parts.keys()].reverse().find((i) => predicate(parts[i]))
-      : [...parts.keys()].find((i) => predicate(parts[i]));
-    if (index === undefined) return null;
-    return parts.splice(index, 1)[0];
+  let rest = String(address).replace(/\s+/g, ' ').trim();
+  const take = (re, group = 1) => {
+    const m = rest.match(re);
+    if (!m) return null;
+    rest = rest.replace(m[0], ' , ');
+    return m[group];
   };
 
-  const zip = take((p) => /^\d{6}$/.test(p));
-  const flat = take((p) => FLAT_RE.test(p), true);
-  const house = take((p) => HOUSE_RE.test(p), true);
-  let street = take((p) => STREET_RE.test(p));
-  if (!street && parts.length > 1) street = parts.pop();
-  const city = parts.shift();
+  const zip = take(ZIP_RE);
+  const region = take(REGION_RE);
+  const flat = take(FLAT_RE);
+  // Отдельного поля под офис в схеме нет, кладём в "Квартира" с типом в тексте,
+  // чтобы в печати не вышло "кв." вместо офиса.
+  const officeMatch = rest.match(OFFICE_RE);
+  const office = officeMatch ? (/^оф/i.test(officeMatch[1]) ? 'оф. ' : 'пом. ') + officeMatch[2] : null;
+  if (officeMatch) rest = rest.replace(officeMatch[0], ' , ');
+  const building = take(BUILDING_RE);
+
+  // Дом без "д." берём по ПОСЛЕДНЕМУ отдельному числу: в названиях улиц бывают
+  // числа ("8 Марта"), а номер дома по привычке пишут в конце.
+  let house = take(HOUSE_RE);
+  if (!house) {
+    const bare = [...rest.matchAll(BARE_NUMBER_RE)].pop();
+    if (bare) {
+      house = bare[1];
+      rest = rest.slice(0, bare.index) + ' , ' + rest.slice(bare.index + bare[0].length);
+    }
+  }
+
+  const parts = rest.split(',').map((p) => p.trim()).filter((p) => p && !COUNTRY_RE.test(p));
+
+  let city = null;
+  let street = null;
+  const streetIndex = parts.findIndex((p) => p.split(' ').some((t) => STREET_TYPES.has(streetTypeOf(t))));
+  if (streetIndex !== -1) {
+    const tokens = parts[streetIndex].split(' ');
+    const typeAt = tokens.findIndex((t) => STREET_TYPES.has(streetTypeOf(t)));
+    const typeWord = tokens[typeAt];
+    parts.splice(streetIndex, 1);
+
+    if (typeAt === tokens.length - 1 && typeAt > 0) {
+      const name = capitalize(tokens.slice(0, typeAt).join(' '));
+      street = isPlainStreetType(streetTypeOf(typeWord)) ? name : name + ' ' + typeWord;
+    } else {
+      const name = capitalize(tokens.slice(typeAt + 1).join(' '));
+      street = isPlainStreetType(streetTypeOf(typeWord)) ? name : typeWord + ' ' + name;
+      const before = tokens.slice(0, typeAt).join(' ');
+      if (before) city = before;
+    }
+  }
+
+  // Без слова-типа одиночный остаток — это город ("Северодвинск"), но если
+  // рядом был номер дома, то скорее улица ("Воскресенская 15").
+  if (!street && parts.length === 1 && house && !city) {
+    street = capitalize(parts.shift());
+  }
+  if (!city && parts.length) city = parts.shift();
+  if (!street && parts.length) street = capitalize(parts.pop());
+  if (parts.length) street = [parts.join(', '), street].filter(Boolean).join(', ');
+
+  if (city) city = capitalize(city.replace(CITY_PREFIX_RE, ''));
 
   const fields = [['Страна', 'Россия']];
   if (zip) fields.push(['Почтовый индекс', zip]);
+  if (region) fields.push(['Регион', capitalize(region)]);
   if (city) fields.push(['Город', city]);
   if (street) fields.push(['Улица', street]);
-  if (house) fields.push(['Дом', house.match(HOUSE_RE)[1]]);
-  if (flat) fields.push(['Квартира', flat.match(FLAT_RE)[1]]);
+  if (house) fields.push(['Дом', house]);
+  if (building) fields.push(['Корпус', building]);
+  const room = [flat, office].filter(Boolean).join(', ');
+  if (room) fields.push(['Квартира', room]);
   return fields;
 }
 
-function buildAddressNode(address, indent) {
+function buildAddressNode(address, fields, indent) {
   const inner = indent + ' ';
   const lines = [indent + '<Адрес>', inner + '<Представление>' + escapeXml(address) + '</Представление>'];
-  parseAddressFields(address).forEach(([type, value]) => {
+  fields.forEach(([type, value]) => {
     lines.push(
       inner + '<АдресноеПоле>',
       inner + ' <Тип>' + type + '</Тип>',
@@ -83,18 +146,17 @@ function buildAddressNode(address, indent) {
   return lines.join('\n') + '\n';
 }
 
-// По схеме <Адрес> стоит строго между <Комментарий> и <Контакты> внутри
-// <Контрагент>, поэтому вставляем его перед <Контакты> (или перед закрывающим
-// тегом контрагента, если контактов нет вообще).
-function patchOrAddAddress(block, address) {
+// С включённой доставкой Тильда сама шлёт пустой <Адрес> — заменяем его на месте.
+// Иначе вставляем перед <Контакты>, как требует порядок элементов схемы.
+function patchOrAddAddress(block, address, fields) {
   const existing = /([ \t]*)<Адрес>[\s\S]*?<\/Адрес>\n?/;
   const m = block.match(existing);
-  if (m) return block.replace(existing, buildAddressNode(address, m[1]));
+  if (m) return block.replace(existing, buildAddressNode(address, fields, m[1]));
 
   const before = /([ \t]*)(<Контакты>|<\/Контрагент>)/;
   const anchor = block.match(before);
-  if (!anchor) return block;
-  return block.replace(before, buildAddressNode(address, anchor[1]) + anchor[1] + anchor[2]);
+  if (!anchor) return null;
+  return block.replace(before, buildAddressNode(address, fields, anchor[1]) + anchor[1] + anchor[2]);
 }
 
 function paymentLabel(captured) {
@@ -102,9 +164,6 @@ function paymentLabel(captured) {
   return captured.paymentSystem || 'не указан';
 }
 
-// Сводка по всем полям заказа для комментария — чтобы не лазить по карточкам
-// контрагента и вкладкам, всё видно сразу при открытии заказа. Формат — простой
-// построчный список "Поле: значение", строки без значения просто пропускаются.
 function buildSummary(captured) {
   const lines = [];
   if (captured.name) lines.push('Имя: ' + captured.name);
@@ -130,13 +189,10 @@ function patchOrdersXml(xmlText, store) {
 
       const captured = store.getOrder(orderId);
       if (!captured) {
-        console.log('Для заказа', orderId, 'вебхук не поймали — оставляю как есть');
+        console.warn('Заказ', orderId, ': вебхук не пойман, отдаю данные Тильды без изменений');
         return docBlock;
       }
-
-      const patched = patchDocBlock(docBlock, captured);
-      console.log('Заказ', orderId, 'подменил данными покупателя из вебхука');
-      return patched;
+      return patchDocBlock(docBlock, captured, orderId);
     });
   } catch (err) {
     console.error('Не удалось пропатчить XML, отдаю оригинал без изменений:', err);
@@ -144,132 +200,73 @@ function patchOrdersXml(xmlText, store) {
   }
 }
 
-function patchDocBlock(docBlock, captured) {
-  // ДИАГНОСТИКА: показываем весь блок <Значения> (реквизиты документа) как есть,
-  // до всяких патчей — чтобы по логам Render можно было увидеть реальные имена
-  // тегов, которые шлёт эта конкретная 1С/Тильда (аналогично тому, как уже виден
-  // тег "Метод оплаты"), и понять, есть ли среди них готовый тег под адрес.
-  const valuesBlockMatch = docBlock.match(DOC_REQ_BLOCK_RE);
-  console.log('--- Блок <ЗначенияРеквизитов> (реквизиты документа) ---');
-  console.log(valuesBlockMatch ? valuesBlockMatch[0] : '(блок не найден)');
-  console.log('--- конец блока <ЗначенияРеквизитов> ---');
-
-  const buyerName = captured.isLegal
-    ? (captured.orgName || captured.name)
-    : captured.name;
+function patchDocBlock(docBlock, captured, orderId) {
+  const buyerName = captured.isLegal ? (captured.orgName || captured.name) : captured.name;
+  const inn = captured.isLegal && captured.inn ? String(captured.inn).replace(/\D/g, '') : '';
+  const addressFields = captured.address ? parseAddressFields(captured.address) : null;
+  const problems = [];
 
   let out = docBlock.replace(/<Контрагенты>[\s\S]*?<\/Контрагенты>/, (block) => {
     let inner = block;
 
     if (buyerName) {
       const safeName = escapeXml(buyerName);
-      inner = inner.replace(
-        /<Наименование>[^<]*<\/Наименование>/g,
-        '<Наименование>' + safeName + '</Наименование>'
-      );
-      inner = inner.replace(
-        /<ПолноеНаименование>[^<]*<\/ПолноеНаименование>/g,
-        '<ПолноеНаименование>' + safeName + '</ПолноеНаименование>'
-      );
+      inner = inner.replace(/<Наименование>[^<]*<\/Наименование>/g, '<Наименование>' + safeName + '</Наименование>');
+      inner = inner.replace(/<ПолноеНаименование>[^<]*<\/ПолноеНаименование>/g, '<ПолноеНаименование>' + safeName + '</ПолноеНаименование>');
     }
 
     if (captured.email) inner = replaceContact(inner, 'Почта', captured.email);
+
+    // 1С молча отбрасывает контакт с типом "Телефон", но принимает "ТелефонРабочий".
     if (captured.phone) {
-      const normalized = normalizePhone(captured.phone);
-      // Проверено на практике: 1С игнорирует <Тип>Телефон</Тип>, который присылает
-      // Тильда, но корректно принимает <Тип>ТелефонРабочий</Тип>. Поэтому у контакта
-      // меняем и тип, и значение.
       inner = inner.replace(
         /(<Контакт>\s*<Тип>)Телефон(<\/Тип>\s*<Значение>)[^<]*(<\/Значение>)/,
-        '$1ТелефонРабочий$2' + escapeXml(normalized) + '$3'
+        '$1ТелефонРабочий$2' + escapeXml(normalizePhone(captured.phone)) + '$3'
       );
-      const check = inner.match(/<Тип>ТелефонРабочий<\/Тип>\s*<Значение>([^<]*)<\/Значение>/);
-      console.log('Телефон в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
     }
 
-    // ИНН — стандартный тег схемы CommerceML прямо внутри <Контрагент> (не внутри
-    // <Контакты>), поэтому вставляем его как обычный дочерний элемент, а не как
-    // контакт. Только для юр.лиц, и только если ИНН реально пришёл в вебхуке.
-    //
-    // ОфициальноеНаименование — по XSD CommerceML 2.10 это единственный признак,
-    // по которому схема вообще различает юрлицо/физлицо у <Контрагент>: группа
-    // РеквизитыЮрЛица обязательно требует именно этот тег (а РеквизитыФизЛица —
-    // ПолноеНаименование, который мы и так уже шлём всем). Тильда его не
-    // присылает вообще ни для физ-, ни для юрлиц, поэтому 1С заводит новых
-    // юрлиц как "Индивидуальный предприниматель" по умолчанию (проверено на
-    // практике 17.09 — при 10-значном ИНН это даёт ошибку валидации, требуется
-    // ручное переключение на "Юридическое лицо" в карточке). Добавляем тег в
-    // расчёте на то, что импорт 1С использует его как признак типа контрагента —
-    // это не задокументированное поведение, требует проверки новым тестом.
-    if (captured.isLegal && buyerName) {
-      inner = inner.replace(/([ \t]*)(<Роль>)/, (full, indent, tag) => {
-        return indent + '<ОфициальноеНаименование>' + escapeXml(buyerName) + '</ОфициальноеНаименование>\n' + indent + tag;
-      });
-      const check = inner.match(/<ОфициальноеНаименование>([^<]*)<\/ОфициальноеНаименование>/);
-      console.log('ОфициальноеНаименование в отправляемом XML теперь:', check ? check[1] : '(не вставился)');
+    // Без <ОфициальноеНаименование> 1С заводит контрагента как ИП, с ним — как
+    // юрлицо (оба варианта проверены). Тип выбираем по длине ИНН: 12 цифр бывает
+    // только у ИП, иначе 1С отвергнет ИНН как неверной длины.
+    if (captured.isLegal && buyerName && inn.length !== 12) {
+      inner = insertBeforeRole(inner, '<ОфициальноеНаименование>' + escapeXml(buyerName) + '</ОфициальноеНаименование>');
     }
-    if (captured.isLegal && captured.inn) {
-      inner = inner.replace(/([ \t]*)(<Роль>)/, (full, indent, tag) => {
-        return indent + '<ИНН>' + escapeXml(captured.inn) + '</ИНН>\n' + indent + tag;
-      });
-      const check = inner.match(/<ИНН>([^<]*)<\/ИНН>/);
-      console.log('ИНН в отправляемом XML теперь:', check ? check[1] : '(не вставился)');
-    }
+    if (inn) inner = insertBeforeRole(inner, '<ИНН>' + inn + '</ИНН>');
 
-    if (captured.address) {
-      inner = patchOrAddAddress(inner, captured.address);
-      const check = inner.match(/<Адрес>[\s\S]*?<\/Адрес>/);
-      console.log('Адрес контрагента в отправляемом XML теперь:\n' + (check ? check[0] : '(не вставился)'));
+    if (addressFields) {
+      const withAddress = patchOrAddAddress(inner, captured.address, addressFields);
+      if (withAddress) inner = withAddress;
+      else problems.push('некуда вставить адрес');
     }
 
     return inner;
   });
 
-  // Сводка по всем полям — в комментарий заказа. Это обычное текстовое поле без
-  // всякой структуры и валидации, поэтому гарантированно отображается как есть,
-  // в отличие от структурированных полей вроде адреса (страна/город/улица/дом
-  // с классификатором) или доп.реквизитов, которые базовая версия 1С может
-  // просто не показать нигде в интерфейсе.
-  // Тильда сама кладёт сюда шаблонную подпись "Комментарий менеджера на сайте:" —
-  // полностью перезаписываем поле сводкой, не приклеивая её к этой заглушке
-  // (иначе в 1С всё слипается в одну строку без видимого переноса).
-  out = out.replace(/<Комментарий>[^<]*<\/Комментарий>/, () => {
-    const summary = buildSummary(captured);
-    return '<Комментарий>' + escapeXml(summary) + '</Комментарий>';
-  });
-  const commentCheck = out.match(/<Комментарий>([\s\S]*?)<\/Комментарий>/);
-  console.log('Комментарий заказа теперь:\n' + (commentCheck ? commentCheck[1] : '(тег не найден)'));
+  // Комментарий именно документа: он идёт после </Контрагенты>. Внутри
+  // контрагента Тильда тоже кладёт <Комментарий> (в пустой <Адрес>).
+  const withComment = out.replace(
+    /(<\/Контрагенты>[\s\S]*?)<Комментарий>[^<]*<\/Комментарий>/,
+    (_, head) => head + '<Комментарий>' + escapeXml(buildSummary(captured)) + '</Комментарий>'
+  );
+  if (withComment === out) problems.push('не найден комментарий заказа');
+  out = withComment;
 
-  // Адрес доставки — структурированное поле, не комментарий: клиенту нужно
-  // печатать документы, а комментарий для этого не годится. Сначала пробуем
-  // найти уже существующий тег "Адрес доставки" среди <ЗначениеРеквизита> (по
-  // аналogии с "Метод оплаты" — такой тег уже существует в XML с дефолтным
-  // значением и просто патчится). Структурированный <Адрес>/ФИАС внутри
-  // <Контрагент> уже пробовали — 1С там ждёт классификатор, простая строка не
-  // ложится, поэтому туда не лезем.
-  if (captured.address) {
-    out = patchOrAddAddressReq(out, captured.address);
-    const check = out.match(/<Наименование>Адрес доставки<\/Наименование>\s*<Значение>([^<]*)<\/Значение>/);
-    console.log('Адрес доставки (реквизит) в отправляемом XML теперь:', check ? check[1] : '(не удалось вставить/найти)');
-  }
-
-  // Способ оплаты: тег "Метод оплаты" в XML от Тильды уже существует, но там
-  // всегда дефолтное значение аккаунта, а не то, что реально выбрал покупатель.
-  // Пока уверенно распознаём только оплату наличными — маппинг для карты ещё
-  // не пойман (см. paymentSystem в вебхуке), поэтому остальные значения не трогаем,
-  // чтобы не подставить туда неверный текст в само поле (в комментарии при этом
-  // значение всё равно видно, каким бы оно ни было).
   if (captured.paymentSystem === 'cash') {
     out = replaceReqValue(out, 'Метод оплаты', 'Наличные');
-    const check = out.match(/<Наименование>Метод оплаты<\/Наименование>\s*<Значение>([^<]*)<\/Значение>/);
-    console.log('Метод оплаты в отправляемом XML теперь:', check ? check[1] : '(тег не найден)');
   }
+
+  const kind = !captured.isLegal ? 'физлицо' : inn.length === 12 ? 'ИП' : 'юрлицо';
+  const addressLog = addressFields ? addressFields.map(([t, v]) => t + '=' + v).join('; ') : 'нет';
+  console.log('Заказ', orderId, ': подставил данные покупателя (' + kind + '), адрес: ' + addressLog);
+  if (problems.length) console.warn('Заказ', orderId, ': ВНИМАНИЕ —', problems.join(', '));
 
   return out;
 }
 
-// Меняем <Значение> у конкретного <ЗначениеРеквизита> по имени в <Наименование>,
-// не трогая остальные реквизиты в списке
+function insertBeforeRole(block, node) {
+  return block.replace(/([ \t]*)(<Роль>)/, (_, indent, tag) => indent + node + '\n' + indent + tag);
+}
+
 function replaceReqValue(block, reqName, newValue) {
   const re = new RegExp(
     '(<ЗначениеРеквизита>\\s*<Наименование>' + reqName + '</Наименование>\\s*<Значение>)[^<]*(</Значение>)'
@@ -277,47 +274,8 @@ function replaceReqValue(block, reqName, newValue) {
   return block.replace(re, '$1' + escapeXml(newValue) + '$2');
 }
 
-// Если тег "Адрес доставки" уже существует среди реквизитов документа — просто
-// подставляем в него значение (как с "Метод оплаты"). Если нет — добавляем
-// новый <ЗначениеРеквизита> на уровне документа, рядом с остальными реквизитами
-// внутри <Значения> (НЕ внутри <Контрагент>/<Адреса> — там ждут ФИАС-формат).
-function patchOrAddAddressReq(block, address) {
-  const reqName = 'Адрес доставки';
-  const existsRe = new RegExp(
-    '<ЗначениеРеквизита>\\s*<Наименование>' + reqName + '</Наименование>\\s*<Значение>[^<]*</Значение>'
-  );
-  if (existsRe.test(block)) {
-    return replaceReqValue(block, reqName, address);
-  }
-  return addReqValue(block, reqName, address);
-}
-
-// Вставляем новый <ЗначениеРеквизита> перед закрывающим тегом реквизитов
-// документа, повторяя отступы существующих узлов, чтобы форматирование осталось
-// прежним. Закрывающий тег берём ПОСЛЕДНИЙ в блоке документа: такой же блок
-// <ЗначенияРеквизитов> есть внутри каждого <Товар>, и попасть надо не в него.
-function addReqValue(block, reqName, value) {
-  const closing = block.match(DOC_REQ_CLOSING_RE);
-  if (!closing) return block;
-
-  const indent = closing[1] + ' ';
-  const innerIndent = indent + ' ';
-  const node =
-    indent + '<ЗначениеРеквизита>' +
-    '\n' + innerIndent + '<Наименование>' + escapeXml(reqName) + '</Наименование>' +
-    '\n' + innerIndent + '<Значение>' + escapeXml(value) + '</Значение>' +
-    '\n' + indent + '</ЗначениеРеквизита>' +
-    '\n';
-
-  return block.replace(DOC_REQ_CLOSING_RE, node + closing[0]);
-}
-
-// Меняем <Значение> внутри конкретного <Контакт> нужного типа, не трогая остальное
 function replaceContact(block, type, value) {
-  const re = new RegExp(
-    '(<Контакт>\\s*<Тип>' + type + '</Тип>\\s*<Значение>)[^<]*(</Значение>)',
-    'g'
-  );
+  const re = new RegExp('(<Контакт>\\s*<Тип>' + type + '</Тип>\\s*<Значение>)[^<]*(</Значение>)', 'g');
   return block.replace(re, '$1' + escapeXml(value) + '$2');
 }
 
