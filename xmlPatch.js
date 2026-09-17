@@ -31,9 +31,14 @@ const capitalize = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 // Дом "N" -> "дом № N". Поэтому "г." и "ул." из ввода убираем, иначе в печати
 // выйдет "г. Москва г". Прочие типы улиц ("проспект") оставляем как есть: как
 // 1С отрисует их иначе, не проверено.
+//
+// Поле "Корпус" импорт 1С выбрасывает, а в "Квартира" берёт только число и
+// ставит тип "кв." (проверено: "оф. 3" напечаталось как "кв. 3"). Поэтому
+// корпус, строение, литеру и офис дописываем в значение "Дом": "15, корп. 2, оф. 3".
 const BOUNDARY = '(?:^|[\\s,])';
 const END = '(?=$|[\\s,])';
 const NUMBER = '\\d+[а-яё]?(?:\\/\\d+)?';
+const ATTACHED_BUILDING = '(?:\\s*к\\.?\\s*(\\d+))?'; // "15к2"
 
 const ZIP_RE = new RegExp(BOUNDARY + '(\\d{6})' + END);
 const REGION_RE = new RegExp(
@@ -41,10 +46,22 @@ const REGION_RE = new RegExp(
   'i'
 );
 const FLAT_RE = new RegExp(BOUNDARY + '(?:кв|квартира)\\.?\\s*(' + NUMBER + ')' + END, 'i');
-const OFFICE_RE = new RegExp(BOUNDARY + '(оф|офис|пом|помещение)\\.?\\s*(' + NUMBER + ')' + END, 'i');
-const BUILDING_RE = new RegExp(BOUNDARY + '(?:к|корп|корпус)\\.?\\s*(\\d+[а-яё]?)' + END, 'i');
-const HOUSE_RE = new RegExp(BOUNDARY + '(?:д|дом)\\.?\\s*(' + NUMBER + ')' + END, 'i');
-const BARE_NUMBER_RE = new RegExp(BOUNDARY + '(' + NUMBER + ')' + END, 'gi');
+const HOUSE_PART_RE = new RegExp(
+  BOUNDARY + '(к|корп|корпус|стр|строение|оф|офис|пом|помещение|лит|литера)\\.?\\s*(' + NUMBER + ')' + END,
+  'gi'
+);
+const LITERA_RE = new RegExp(BOUNDARY + '(лит|литера)\\.?\\s*([а-яё])' + END, 'gi');
+const HOUSE_RE = new RegExp(BOUNDARY + '(?:д|дом)\\.?\\s*(' + NUMBER + ')' + ATTACHED_BUILDING + END, 'i');
+const BARE_NUMBER_RE = new RegExp(BOUNDARY + '(' + NUMBER + ')' + ATTACHED_BUILDING + END, 'gi');
+
+const HOUSE_PART_LABELS = [
+  [/^к|^корп/i, 'корп.'],
+  [/^стр/i, 'стр.'],
+  [/^лит/i, 'лит.'],
+  [/^оф/i, 'оф.'],
+  [/^пом/i, 'пом.'],
+];
+const houseLabelOf = (word) => HOUSE_PART_LABELS.find(([re]) => re.test(word))[1];
 const CITY_PREFIX_RE = /^(?:г|гор|город)\.?\s+/i;
 const COUNTRY_RE = /^(?:россия|рф|российская федерация)$/i;
 
@@ -68,23 +85,28 @@ function parseAddressFields(address) {
   const zip = take(ZIP_RE);
   const region = take(REGION_RE);
   const flat = take(FLAT_RE);
-  // Отдельного поля под офис в схеме нет, кладём в "Квартира" с типом в тексте,
-  // чтобы в печати не вышло "кв." вместо офиса.
-  const officeMatch = rest.match(OFFICE_RE);
-  const office = officeMatch ? (/^оф/i.test(officeMatch[1]) ? 'оф. ' : 'пом. ') + officeMatch[2] : null;
-  if (officeMatch) rest = rest.replace(officeMatch[0], ' , ');
-  const building = take(BUILDING_RE);
+
+  const buildings = [];
+  const offices = [];
+  const collectHousePart = (_, word, value) => {
+    const label = houseLabelOf(word);
+    (label === 'оф.' || label === 'пом.' ? offices : buildings).push(label + ' ' + value);
+    return ' , ';
+  };
+  rest = rest.replace(HOUSE_PART_RE, collectHousePart).replace(LITERA_RE, collectHousePart);
 
   // Дом без "д." берём по ПОСЛЕДНЕМУ отдельному числу: в названиях улиц бывают
   // числа ("8 Марта"), а номер дома по привычке пишут в конце.
-  let house = take(HOUSE_RE);
-  if (!house) {
-    const bare = [...rest.matchAll(BARE_NUMBER_RE)].pop();
-    if (bare) {
-      house = bare[1];
-      rest = rest.slice(0, bare.index) + ' , ' + rest.slice(bare.index + bare[0].length);
-    }
+  let houseMatch = rest.match(HOUSE_RE);
+  if (!houseMatch) houseMatch = [...rest.matchAll(BARE_NUMBER_RE)].pop() || null;
+  let house = null;
+  if (houseMatch) {
+    house = houseMatch[1];
+    if (houseMatch[2]) buildings.unshift('корп. ' + houseMatch[2]);
+    const at = houseMatch.index;
+    rest = rest.slice(0, at) + ' , ' + rest.slice(at + houseMatch[0].length);
   }
+  const houseValue = [house, ...buildings, ...offices].filter(Boolean).join(', ');
 
   const parts = rest.split(',').map((p) => p.trim()).filter((p) => p && !COUNTRY_RE.test(p));
 
@@ -124,10 +146,8 @@ function parseAddressFields(address) {
   if (region) fields.push(['Регион', capitalize(region)]);
   if (city) fields.push(['Город', city]);
   if (street) fields.push(['Улица', street]);
-  if (house) fields.push(['Дом', house]);
-  if (building) fields.push(['Корпус', building]);
-  const room = [flat, office].filter(Boolean).join(', ');
-  if (room) fields.push(['Квартира', room]);
+  if (houseValue) fields.push(['Дом', houseValue]);
+  if (flat) fields.push(['Квартира', flat]);
   return fields;
 }
 
