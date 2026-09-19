@@ -202,14 +202,20 @@ function patchOrdersXml(xmlText, store) {
   }
 
   try {
-    return xmlText.replace(/<Документ>[\s\S]*?<\/Документ>/g, (docBlock) => {
+    return xmlText.replace(/<Документ>[\s\S]*?<\/Документ>/g, (original) => {
+      // Валюта магазина в Тильде — USD, но скрипт на сайте переводит цены в рубли
+      // ещё в корзине, так что суммы в заказе уже рублёвые. Без замены 1С считает
+      // заказ долларовым и пересчитывает его по курсу. Меняем во всех заказах,
+      // даже без вебхука: скрипт отрабатывает независимо от него.
+      const docBlock = original.replace('<Валюта>USD</Валюта>', '<Валюта>RUB</Валюта>');
+
       const idMatch = docBlock.match(/<Ид>([^<]*)<\/Ид>/);
       const orderId = idMatch ? idMatch[1].trim() : null;
       if (!orderId) return docBlock;
 
       const captured = store.getOrder(orderId);
       if (!captured) {
-        console.warn('Заказ', orderId, ': вебхук не пойман, отдаю данные Тильды без изменений');
+        console.warn('Заказ', orderId, ': вебхук не пойман, данные покупателя от Тильды (валюта заменена на RUB)');
         return docBlock;
       }
       return patchDocBlock(docBlock, captured, orderId);
